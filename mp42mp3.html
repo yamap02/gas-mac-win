@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MP4 to MP3 Converter (lamejs)</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- lamejs for MP3 encoding (Pure JavaScript, no WASM/Worker CORS issues) -->
+    <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+    <style>
+        .drag-over {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4 text-gray-800">
+
+    <div class="bg-white rounded-xl shadow-lg p-8 max-w-md w-full">
+        <h1 class="text-2xl font-bold text-center mb-6 text-gray-800">MP4 → MP3 変換</h1>
+        
+        <!-- ドラッグ＆ドロップエリア -->
+        <div id="dropZone" class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer transition-colors duration-200 hover:bg-gray-50 mb-6">
+            <svg class="mx-auto h-12 w-12 text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+            </svg>
+            <p class="text-sm text-gray-600 font-medium">MP4ファイルをドラッグ＆ドロップ</p>
+            <p class="text-xs text-gray-500 mt-1">または、クリックしてファイルを選択</p>
+            <input type="file" id="fileInput" accept="video/mp4" class="hidden">
+        </div>
+
+        <!-- 選択されたファイル情報 -->
+        <div id="fileInfo" class="hidden mb-6 p-4 bg-blue-50 rounded-lg text-sm text-blue-800 break-all">
+            <span class="font-bold">選択中:</span> <span id="fileName"></span>
+        </div>
+
+        <!-- コントロールボタン -->
+        <button id="convertBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+            MP3に変換
+        </button>
+
+        <!-- プログレスエリア -->
+        <div id="progressArea" class="hidden mt-6">
+            <div class="flex justify-between text-sm mb-1 text-gray-600">
+                <span id="statusText">待機中...</span>
+                <span id="progressText">0%</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2.5">
+                <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- ダウンロードエリア -->
+        <div id="downloadArea" class="hidden mt-6 text-center">
+            <p class="text-green-600 font-bold mb-3">✓ 変換完了</p>
+            <a id="downloadLink" class="inline-block w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-lg transition duration-200 text-center">
+                MP3をダウンロード
+            </a>
+        </div>
+        
+        <!-- エラーメッセージ -->
+        <div id="errorMessage" class="hidden mt-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm text-left break-words">
+        </div>
+    </div>
+
+    <script>
+        // DOM要素
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileNameDisplay = document.getElementById('fileName');
+        const convertBtn = document.getElementById('convertBtn');
+        const progressArea = document.getElementById('progressArea');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const statusText = document.getElementById('statusText');
+        const downloadArea = document.getElementById('downloadArea');
+        const downloadLink = document.getElementById('downloadLink');
+        const errorMessage = document.getElementById('errorMessage');
+
+        let selectedFile = null;
+
+        // イベントリスナー設定
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+            if (e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        convertBtn.addEventListener('click', startConversion);
+
+        function handleFileSelect(file) {
+            hideError();
+            if (file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) {
+                showError('MP4ファイルを選択してください。');
+                return;
+            }
+            selectedFile = file;
+            fileNameDisplay.textContent = file.name;
+            fileInfo.classList.remove('hidden');
+            convertBtn.disabled = false;
+            
+            // リセット
+            progressArea.classList.add('hidden');
+            downloadArea.classList.add('hidden');
+            progressBar.style.width = '0%';
+            progressText.textContent = '0%';
+        }
+
+        async function startConversion() {
+            if (!selectedFile) return;
+
+            try {
+                convertBtn.disabled = true;
+                progressArea.classList.remove('hidden');
+                downloadArea.classList.add('hidden');
+                hideError();
+
+                // 1. ファイルをArrayBufferとして読み込む
+                statusText.textContent = 'ファイルを読み込み中...';
+                const arrayBuffer = await selectedFile.arrayBuffer();
+
+                // 2. ブラウザのAudioContextを使って音声をデコード (MP4から音声を抽出)
+                statusText.textContent = '音声をデコード中... (数秒かかります)';
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+                // 3. lamejsを使って非同期にMP3エンコード (UIをフリーズさせない)
+                statusText.textContent = 'MP3へエンコード中...';
+                const mp3Blob = await encodeToMp3Async(audioBuffer, (percent) => {
+                    progressBar.style.width = `${percent}%`;
+                    progressText.textContent = `${percent}%`;
+                });
+
+                // 4. 完了とダウンロード準備
+                statusText.textContent = '完了処理中...';
+                const url = URL.createObjectURL(mp3Blob);
+                const originalNameWithoutExt = selectedFile.name.replace(/\.[^/.]+$/, "");
+                
+                downloadLink.href = url;
+                downloadLink.download = `${originalNameWithoutExt}.mp3`;
+
+                progressArea.classList.add('hidden');
+                downloadArea.classList.remove('hidden');
+                convertBtn.disabled = false;
+
+            } catch (error) {
+                console.error('変換エラー詳細:', error);
+                showError(`エラー: ${error.message || 'ファイルの読み込みまたはデコードに失敗しました。'}`);
+                convertBtn.disabled = false;
+                progressArea.classList.add('hidden');
+            }
+        }
+
+        /**
+         * AudioBufferをチャンク分割してMP3にエンコードする関数
+         * (メインスレッドのブロックを防ぐためsetTimeoutで分割処理)
+         */
+        function encodeToMp3Async(audioBuffer, onProgress) {
+            return new Promise((resolve, reject) => {
+                try {
+                    const channels = audioBuffer.numberOfChannels;
+                    const sampleRate = audioBuffer.sampleRate;
+                    const mp3Encoder = new lamejs.Mp3Encoder(channels, sampleRate, 128); // 128kbps
+
+                    const leftData = audioBuffer.getChannelData(0);
+                    const rightData = channels > 1 ? audioBuffer.getChannelData(1) : leftData;
+
+                    // 1度に処理するサンプル数 (1152はlamejsの内部処理単位に合わせた値)
+                    const sampleBlockSize = 1152 * 10; 
+                    const mp3Data = [];
+                    let offset = 0;
+
+                    function processChunk() {
+                        const end = Math.min(offset + sampleBlockSize, leftData.length);
+                        
+                        // Float32 (-1.0 ~ 1.0) を Int16 (-32768 ~ 32767) に変換
+                        const leftInt16 = new Int16Array(end - offset);
+                        const rightInt16 = new Int16Array(end - offset);
+                        
+                        for (let i = 0; i < (end - offset); i++) {
+                            const leftSample = Math.max(-1, Math.min(1, leftData[offset + i]));
+                            leftInt16[i] = leftSample < 0 ? leftSample * 0x8000 : leftSample * 0x7FFF;
+                            
+                            if (channels > 1) {
+                                const rightSample = Math.max(-1, Math.min(1, rightData[offset + i]));
+                                rightInt16[i] = rightSample < 0 ? rightSample * 0x8000 : rightSample * 0x7FFF;
+                            }
+                        }
+
+                        let mp3buf;
+                        if (channels === 1) {
+                            mp3buf = mp3Encoder.encodeBuffer(leftInt16);
+                        } else {
+                            mp3buf = mp3Encoder.encodeBuffer(leftInt16, rightInt16);
+                        }
+
+                        if (mp3buf.length > 0) {
+                            mp3Data.push(mp3buf);
+                        }
+
+                        offset += sampleBlockSize;
+
+                        if (offset < leftData.length) {
+                            // 進捗の更新
+                            const percent = Math.round((offset / leftData.length) * 100);
+                            onProgress(percent);
+                            // イベントループを解放してUI更新を許容
+                            setTimeout(processChunk, 0);
+                        } else {
+                            // 最後のバッファをフラッシュ
+                            const finalBuf = mp3Encoder.flush();
+                            if (finalBuf.length > 0) {
+                                mp3Data.push(finalBuf);
+                            }
+                            onProgress(100);
+                            resolve(new Blob(mp3Data, { type: 'audio/mp3' }));
+                        }
+                    }
+
+                    // エンコード開始
+                    processChunk();
+
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        }
+
+        function showError(msg) {
+            errorMessage.textContent = msg;
+            errorMessage.classList.remove('hidden');
+        }
+
+        function hideError() {
+            errorMessage.classList.add('hidden');
+        }
+    </script>
+</body>
+</html>
